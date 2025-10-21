@@ -2,28 +2,49 @@ import os
 import shutil
 import xml.etree.ElementTree as ET
 
-def configure_freeglut(vcproj_path, freeglut_dir):
+
+def configure_opengl_libs(vcproj_path, freeglut_dir, glew_dir):
+    """
+    Configures an MSVC .vcxproj file to include paths and dependencies for
+    OpenGL libraries like FreeGLUT and GLEW.
+    """
     if not os.path.isfile(vcproj_path):
-        print(f"ERROR: {vcproj_path} does not exist")
+        print(f"❌ ERROR: Project file not found at '{vcproj_path}'")
         return
 
     project_dir = os.path.dirname(vcproj_path)
-    include_path = os.path.join(freeglut_dir, "include")
-    lib_path = os.path.join(freeglut_dir, "lib", "x64")
-    dll_path = os.path.join(freeglut_dir, "bin", "x64", "freeglut.dll")
 
-    # Copy DLL into project folder
-    if os.path.isfile(dll_path):
-        shutil.copy(dll_path, project_dir)
-        print(f"Copied DLL -> {project_dir}")
-    else:
-        print(f"WARNING: {dll_path} not found, skipping DLL copy.")
+    # --- Library Definitions ---
+    # Define all libraries to be configured here. The script will loop through them.
+    libs_to_configure = [
+        {
+            "name": "FreeGLUT",
+            "root_dir": freeglut_dir,
+            "lib_name": "freeglut.lib",
+            "dll_name": "freeglut.dll",
+            "lib_subdir": os.path.join("lib", "x64"),
+            "dll_subdir": os.path.join("bin", "x64")
+        },
+        {
+            "name": "GLEW",
+            "root_dir": glew_dir,
+            "lib_name": "glew32.lib",
+            "dll_name": "glew32.dll",
+            # GLEW binary releases often have this structure
+            "lib_subdir": os.path.join("lib", "Release", "x64"),
+            "dll_subdir": os.path.join("bin", "Release", "x64")
+        }
+    ]
 
-    # Load and parse XML
-    tree = ET.parse(vcproj_path)
-    root = tree.getroot()
+    # --- Load and Prepare XML Document ---
+    try:
+        tree = ET.parse(vcproj_path)
+        root = tree.getroot()
+    except ET.ParseError:
+        print(f"❌ ERROR: Could not parse the XML file. Is '{vcproj_path}' a valid .vcxproj file?")
+        return
 
-    # Extract namespace
+    # Extract the XML namespace (crucial for MSVC projects)
     ns = ""
     if root.tag.startswith("{"):
         ns = root.tag.split("}")[0].strip("{")
@@ -32,70 +53,97 @@ def configure_freeglut(vcproj_path, freeglut_dir):
     def qname(tag):
         return f"{{{ns}}}{tag}" if ns else tag
 
-    configs = ["'$(Configuration)|$(Platform)'=='Debug|x64'",
-               "'$(Configuration)|$(Platform)'=='Release|x64'"]
+    # --- Process Each Library ---
+    libs_were_configured = False
+    for lib_info in libs_to_configure:
+        name = lib_info["name"]
+        root_dir = lib_info["root_dir"]
 
-    for cond in configs:
-        pg = None
-        for group in root.findall(qname("PropertyGroup")):
-            if group.attrib.get("Condition") == cond and group.attrib.get("Label", "") != "Configuration":
-                pg = group
-                break
-
-        if pg is None:
-            pg = ET.SubElement(root, qname("PropertyGroup"))
-            pg.set("Condition", cond)
-
-        # Add include/lib paths
-        include_elem = pg.find(qname("IncludePath"))
-        if include_elem is None:
-            include_elem = ET.SubElement(pg, qname("IncludePath"))
-            include_elem.text = f"{include_path};$(IncludePath)"
-        elif include_path not in include_elem.text:
-            include_elem.text = f"{include_path};" + include_elem.text
-
-        lib_elem = pg.find(qname("LibraryPath"))
-        if lib_elem is None:
-            lib_elem = ET.SubElement(pg, qname("LibraryPath"))
-            lib_elem.text = f"{lib_path};$(LibraryPath)"
-        elif lib_path not in lib_elem.text:
-            lib_elem.text = f"{lib_path};" + lib_elem.text
-
-    # Add linker dependencies into Debug/Release x64
-    for idg in root.findall(qname("ItemDefinitionGroup")):
-        cond = idg.attrib.get("Condition", "")
-        if "x64" not in cond:
+        if not root_dir or not os.path.isdir(root_dir):
+            print(f"ℹ️ Path for {name} not provided or invalid. Skipping.")
             continue
 
-        link = idg.find(qname("Link"))
-        if link is None:
-            link = ET.SubElement(idg, qname("Link"))
+        print(f"\n--- Configuring {name} ---")
+        libs_were_configured = True
 
-        deps = link.find(qname("AdditionalDependencies"))
-        if deps is None:
-            deps = ET.SubElement(link, qname("AdditionalDependencies"))
-            deps.text = "freeglut.lib;opengl32.lib;glu32.lib;%(AdditionalDependencies)"
+        # Construct paths from root directory
+        include_path = os.path.join(root_dir, "include")
+        lib_path = os.path.join(root_dir, lib_info["lib_subdir"])
+        dll_path = os.path.join(root_dir, lib_info["dll_subdir"], lib_info["dll_name"])
+        linker_lib = lib_info["lib_name"]
+
+        # 1. Copy DLL to the project's output directory
+        if os.path.isfile(dll_path):
+            shutil.copy(dll_path, project_dir)
+            print(f"✅ Copied {lib_info['dll_name']} to project directory.")
         else:
-            current = deps.text or "%(AdditionalDependencies)"
-            if "freeglut.lib" not in current:
-                current = "freeglut.lib;" + current
-            if "opengl32.lib" not in current:
-                current = "opengl32.lib;" + current
-            if "glu32.lib" not in current:
-                current = "glu32.lib;" + current
-            deps.text = current
+            print(f"⚠️ WARNING: DLL not found at '{dll_path}'. Please copy it manually.")
 
-    # Backup and save
-    backup = vcproj_path + ".bak"
-    shutil.copy2(vcproj_path, backup)
-    print(f"Backup saved as {backup}")
+        # 2. Add Include and Library paths to all x64 configurations
+        for item_group in root.findall(qname("ItemDefinitionGroup")):
+            condition = item_group.attrib.get("Condition", "")
+            if "x64" not in condition:
+                continue
 
-    tree.write(vcproj_path, encoding="utf-8", xml_declaration=True)
-    print("✅ FreeGLUT configuration applied successfully.")
+            # Add Include Path
+            cl_compile = item_group.find(qname("ClCompile"))
+            if cl_compile is not None:
+                inc_dirs = cl_compile.find(qname("AdditionalIncludeDirectories"))
+                if inc_dirs is None:
+                    inc_dirs = ET.SubElement(cl_compile, qname("AdditionalIncludeDirectories"))
+                    inc_dirs.text = f"{include_path};%(AdditionalIncludeDirectories)"
+                elif include_path not in (inc_dirs.text or ""):
+                    inc_dirs.text = f"{include_path};{inc_dirs.text}"
+
+            # Add Library Path
+            link = item_group.find(qname("Link"))
+            if link is not None:
+                lib_dirs = link.find(qname("AdditionalLibraryDirectories"))
+                if lib_dirs is None:
+                    lib_dirs = ET.SubElement(link, qname("AdditionalLibraryDirectories"))
+                    lib_dirs.text = f"{lib_path};%(AdditionalLibraryDirectories)"
+                elif lib_path not in (lib_dirs.text or ""):
+                    lib_dirs.text = f"{lib_path};{lib_dirs.text}"
+
+        print(f"✅ Added Include and Library paths for {name}.")
+
+        # 3. Add Linker Dependency
+        for item_group in root.findall(qname("ItemDefinitionGroup")):
+            condition = item_group.attrib.get("Condition", "")
+            if "x64" not in condition:
+                continue
+
+            link = item_group.find(qname("Link"))
+            if link is not None:
+                deps = link.find(qname("AdditionalDependencies"))
+                if deps is None:
+                    deps = ET.SubElement(link, qname("AdditionalDependencies"))
+                    deps.text = f"{linker_lib};%(AdditionalDependencies)"
+                elif linker_lib not in (deps.text or ""):
+                    deps.text = f"{linker_lib};{deps.text}"
+
+        print(f"✅ Added '{linker_lib}' to linker dependencies.")
+
+    # --- Finalize and Save ---
+    if libs_were_configured:
+        backup_path = vcproj_path + ".bak"
+        print(f"\nSaving changes...")
+        shutil.copy2(vcproj_path, backup_path)
+        print(f"✅ Backup of original project file saved to '{backup_path}'")
+
+        tree.write(vcproj_path, encoding="utf-8", xml_declaration=True)
+        print("🎉 Configuration applied successfully!")
+    else:
+        print("\nNo libraries were configured.")
+
 
 if __name__ == "__main__":
-    print("=== FreeGLUT Visual Studio Configurator ===\nCreated by: VanjDev")
-    vcproj = input("Enter path to your .vcxproj file: ").strip('" ')
-    freeglut = input("Enter path to FreeGLUT root folder: ").strip('" ')
+    print("=== Visual Studio OpenGL Library Configurator ===")
+    print("This script will modify your .vcxproj file to link FreeGLUT and GLEW.")
+    print("Leave a path blank to skip configuration for that library.\n")
 
-    configure_freeglut(vcproj, freeglut)
+    vcproj = input("Enter the path to your .vcxproj file: ").strip('" ')
+    freeglut = input("Enter the path to the FreeGLUT root folder: ").strip('" ')
+    glew = input("Enter the path to the GLEW root folder: ").strip('" ')
+
+    configure_opengl_libs(vcproj, freeglut, glew)
